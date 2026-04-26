@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 完全睁眼 | ≥ 0.80 | 实时 | 像素采样为 ~14400 颗柔粒子；最大抖动半径 50px；颜色去饱和 0.45 |
 | 中间过渡 | 0.30 - 0.80 | 实时 | 抖动半径 / 饱和度 / 粒子大小同步线性插值 |
-| 完全闭眼 | < 0.30 | **冻结上一帧** | 暖色叠加 (255,218,175) α=55；vignette；film grain；7.8s 周期 ±1.4% 呼吸缩放 |
+| 完全闭眼 | < 0.30 | **冻结上一帧** | Orange-teal 分级 + halation 高光晕 + 漂移漏光 + 多相位呼吸 + Ken Burns 微漂移 + 彩色 grain（v2 详见 Decision #5） |
 
 ## 搜索结论
 
@@ -58,6 +58,52 @@
 - **放弃了**：每帧完整 `clear()`（粒子瞬间消失，运动感太硬）
 - **理由**：留约 4-5 帧的轨迹尾迹，加强"流动看不清"的感觉；切到闭眼时 α 加大让残影迅速被记忆层盖掉，避免两层混叠脏画
 
+### Decision #5：闭眼态升级到电影记忆质感（v2）
+
+v1 用单色暖叠 + vignette + 单色 grain + 单频呼吸，色彩太"单调暖"，缺艺术家做"记忆"的层次感。v2 借鉴电影 / 胶片美学经验，把闭眼态拆成 6 个独立可调的视觉层。
+
+**外部灵感来源（WebSearch）**
+
+- 王家卫 *In the Mood for Love* / *Fallen Angels*：smudge motion（快门 + 帧重叠把动作糊住）+ lush framing；记忆是"凝住即将消逝的瞬间"
+- Tarkovsky *Nostalghia*：sculpting in time，"现在被过去叠加"——画面应有多重时间相位
+- 胶片美学四件套：halation（乳剂物理光溢出）/ light leak（漏光）/ colored grain / orange-teal grading
+
+**新增视觉层（按渲染顺序，从底到顶）**
+
+1. **主图 + Ken Burns 微漂移**：±5px 二维漂移（次相位 + 三相位驱动），主相位驱动 ±1.8% 缩放，tint α 也呼吸
+2. **Orange-teal color grading**：用 canvas blendMode 做近似 LUT
+   - SCREEN 暖色 (255, 200, 140) α=30 → 推高光偏橙
+   - MULTIPLY 青色 (70, 95, 115) α=38 → 推阴影偏青
+   - 分级强度也跟三相位呼吸 ±10%
+3. **Halation 高光晕**：从 memoryGfx 烘焙缓存（懒计算，记忆帧不变时只算一次）
+   - blur 6 → threshold 0.62 → blur 14 → 暖色 tint (255,175,110) → SCREEN 叠回
+   - 强度跟主相位呼吸 ±15%
+4. **Light leak 漂移漏光**：径向暖色 gradient
+   - 中心位置 (0.68w, 0.22h) 缓慢漂移（0.12Hz 主频 + 0.83 倍频错位）
+   - peak α 跟次相位呼吸 60%↔100%
+   - SCREEN 叠加，加性不压暗
+5. **Vignette**：强度跟三相位呼吸 ±20%
+6. **Colored grain**：RGB 三通道独立噪声（暖偏区间），420 颗 / 帧；视觉上比单色白点更胶片
+
+**多相位呼吸**
+
+| 相位 | 周期 | 驱动 |
+|---|---|---|
+| 主 | 7.8s | scale + tint α + halation 强度 |
+| 次 | 11s | vignette + light leak 呼吸 + 轻微 drift Y |
+| 三 | 5.4s | drift X + color grading 强度 |
+
+三个错频不重合，避免"齐步呼吸"那种机械感。
+
+**性能**
+
+闭眼态没有粒子层，每帧只有几张 image / radial gradient / rect blendMode。Halation 用 lazy bake 避免每帧 filter（filter 全屏是真贵），记忆帧不变时只算一次。
+
+**放弃的元素**
+
+- **Chromatic aberration（红蓝分离）**：容易过头变 glitch，偏离"温柔记忆"语义
+- **Edge smudge**：和 halation 视觉重叠，性价比低
+
 ## 文件结构
 
 ```
@@ -94,22 +140,43 @@ const CFG = {
   OPENNESS_EMA:           0.35,
   MEMORY_REFRESH_OPENNESS: 0.5,
 
-  SAMPLE_W: 160, SAMPLE_H: 90,         // 14400 粒子
-  PARTICLE_SIZE_BASE: 4,               // 闭眼时粒子大小
-  PARTICLE_SIZE_OPEN: 7,               // 睁眼时粒子大小（更"散"）
+  // 粒子化（睁眼态）
+  SAMPLE_W: 160, SAMPLE_H: 90,
+  PARTICLE_SIZE_BASE: 4,
+  PARTICLE_SIZE_OPEN: 7,
   MAX_JITTER_PX:    50,
   TRAIL_ALPHA_OPEN: 22,
   TRAIL_ALPHA_CLOSE: 80,
   DESATURATION_OPEN: 0.45,
   PARTICLE_ALPHA: 200,
 
-  MEMORY_TINT:        [255, 218, 175],
-  MEMORY_TINT_ALPHA:  55,
-  VIGNETTE_INTENSITY: 0.7,
-  GRAIN_DENSITY:      350,
-  GRAIN_ALPHA:        22,
-  BREATHE_AMPL:       0.014,
-  BREATHE_PERIOD_MS:  7800,
+  // 记忆态 v2 · 多相位呼吸
+  BREATH_MAIN_MS:       7800,
+  BREATH_SECONDARY_MS:  11000,
+  BREATH_TERTIARY_MS:   5400,
+  BREATHE_SCALE_AMPL:   0.018,
+  BREATHE_TINT_AMPL:    0.18,
+  BREATHE_VIG_AMPL:     0.20,
+  DRIFT_PX:             5,
+  TINT_BASE_ALPHA:      0.92,
+
+  // 记忆态 v2 · Orange-teal grading
+  GRADE_HIGHLIGHT_RGB:   [255, 200, 140], GRADE_HIGHLIGHT_ALPHA: 30,  // SCREEN
+  GRADE_SHADOW_RGB:      [70, 95, 115],   GRADE_SHADOW_ALPHA:    38,  // MULTIPLY
+
+  // 记忆态 v2 · Halation
+  HALATION_BLUR1: 6, HALATION_THRESHOLD: 0.62, HALATION_BLUR2: 14,
+  HALATION_TINT: [255, 175, 110], HALATION_ALPHA: 130,
+
+  // 记忆态 v2 · Light leak
+  LIGHT_LEAK_RGB: [255, 195, 130],
+  LIGHT_LEAK_PEAK: 0.30,
+  LIGHT_LEAK_DRIFT_HZ: 0.12,
+
+  // 记忆态 v2 · Vignette + Grain
+  VIGNETTE_INTENSITY: 0.72,
+  GRAIN_DENSITY:      420,
+  GRAIN_ALPHA:        24,
 };
 ```
 
@@ -192,3 +259,4 @@ python -m http.server 8000
 - Decision #2：闭眼=冻结上一帧 + 1-2% 呼吸缩放
 - Decision #3：眼睁开度 = 双眼 EAR 平均 + 自适应基线
 - Decision #4：粒子层渲染策略 → 半透明黑底 trail，不每帧 clear
+- Decision #5：闭眼态升级到电影记忆质感 v2（orange-teal + halation + light leak + multi-phase breathing + Ken Burns + colored grain）
