@@ -1,6 +1,6 @@
 // the world, to me — sketch
 // 睁眼 = 摄像头画面粒子化模糊
-// 闭眼 = 上一帧定格 + orange-teal 分级 + halation 高光晕 + 漂移漏光 + 多相位呼吸 + film grain
+// 闭眼 = latent-echo 多帧叠加 + orange-teal 分级 + halation 高光晕 + 漂移漏光 + 多相位呼吸 + film grain
 // 详见 docs/the_world_to_me_Solution.md
 
 // ============== 调参（集中放，方便调） ==============
@@ -58,6 +58,33 @@ const CFG = {
   // Colored grain（彩色噪点 > 单色，更胶片）
   GRAIN_DENSITY:         420,
   GRAIN_ALPHA:           24,
+
+  // ============ Latent-echo（多帧"过去"叠加） ============
+  // 灵感：Refik Anadol 的 latent walk + Memo Akten 的 Deep Meditations
+  // —— 现在被过去叠住，记忆是高维空间里的近邻游走。
+  // 实现：env 一个 N 张全屏 graphics 的环形缓冲，每隔 INTERVAL 在睁眼时
+  // 偷拍一张当前 memoryGfx 进 [0]；旧 entry 整体右挪，每挪一格做一次
+  // 增量 BLUR；最老的释放。闭眼合成时从老到新画 echo，主 memoryGfx 在最上层。
+  ECHO_LAYERS:                   4,        // memoryGfx 之外保留 4 张快照
+  ECHO_COMMIT_INTERVAL_MS:    1100,        // 每 ~1.1s 偷拍一张
+  ECHO_COMMIT_OPENNESS_MIN:   0.45,        // openness < 此值不 commit（闭眼时缓冲冻结）
+  ECHO_DECAY:        [0.75, 0.55, 0.38, 0.22], // 加大 alpha：色块覆盖力更强（毕加索面片）
+  ECHO_OFFSET_PX:    [25,   55,   95,   150 ], // 大幅加大，让 echo 真的探到主体外
+  ECHO_BLUR_PER_COMMIT:        0.0,        // 不累积 BLUR：echo 保持原始锐度 → 色块感强
+  // 毕加索立体主义色阶量化：commit 时对 echo 做一次 POSTERIZE，
+  // 把每通道压到 N 级（256→3）→ 渐变变平涂色块。配合 tint 染色 → 一张脸被分成几片纯色面。
+  ECHO_POSTERIZE_LEVEL:        3,          // 每通道 3 级 = 27 色 = 立体主义平涂感
+  // 毕加索玫瑰-蓝色时期混合色板：饱和度更高、跨度更大的 4 段调子
+  // echo[0] 玫瑰时期暖橙红 / echo[1] 《梦》玫红 / echo[2] 蓝色立体主义蓝紫 / echo[3] 冷青绿
+  ECHO_PALETTE_RGB: [
+    [255, 145,  80], // echo[0] 暖橙红
+    [210,  75, 110], // echo[1] 玫红
+    [ 90,  80, 165], // echo[2] 蓝紫
+    [ 45, 130, 145], // echo[3] 冷青绿
+  ],
+  // Wong/Gush smudge motion：所有 echo 沿同一 trail 方向拖尾（不再各自随机），
+  // 方向缓慢旋转一周，闭眼瞬间冻结当时的方向 → 时间拖尾感
+  ECHO_TRAIL_ROTATE_MS:    18000,
 };
 
 // ============== 状态 ==============
@@ -69,6 +96,13 @@ let memoryHasFrame = false;
 
 let halationGfx;        // 高光晕缓存（从 memoryGfx 烘焙得到）
 let halationStale = true;
+
+// Latent-echo 环形缓冲：[0] = 最近一次 commit 的快照，[N-1] = 最老
+// 每项 { gfx: p5.Graphics }
+// 注：v3.4 起所有 echo 共享同一 trail 方向（缓慢旋转），不再每个 echo 独立随机方向。
+let memoryEchoes = [];
+let echoCommitTimer = 0;
+let echoesCommitted = 0; // 已经真正写入快照的层数（启动时为 0，最大 = ECHO_LAYERS）
 
 let earWarmupFrames = 0;
 let maxEAR = 0;
@@ -105,6 +139,8 @@ function setup() {
   halationGfx.pixelDensity(1);
   halationGfx.noStroke();
 
+  initEchoes();
+
   background(0);
 
   statusDiv = createDiv("");
@@ -122,6 +158,8 @@ function windowResized() {
   halationGfx.pixelDensity(1);
   halationGfx.noStroke();
 
+  initEchoes();
+
   memoryHasFrame = false;
   halationStale = true;
   background(0);
@@ -137,6 +175,13 @@ function draw() {
 
   if (smoothOpenness > CFG.MEMORY_REFRESH_OPENNESS || !memoryHasFrame) {
     refreshMemoryGfx();
+  }
+
+  // Latent-echo：节奏性偷拍当前 memoryGfx 进环形缓冲
+  // 闭眼时 commitEcho 内部会拒绝（openness 门槛），缓冲自然冻结
+  if (millis() - echoCommitTimer >= CFG.ECHO_COMMIT_INTERVAL_MS) {
+    commitEcho();
+    echoCommitTimer = millis();
   }
 
   const mix = constrain(
@@ -223,6 +268,67 @@ function refreshMemoryGfx() {
   halationStale = true; // 记忆帧更新 → halation 缓存作废，待 lazy bake
 }
 
+// ============== Latent-echo 环形缓冲 ==============
+// 把过去几个时间点的 memoryGfx 快照保留下来，闭眼合成时叠加，
+// 模拟 latent space 里"附近游走"——记忆是高维空间里的近邻插值。
+// commitEcho 是 commit 时机的唯一入口，门槛包括睁眼度 + warmup 完成。
+
+function disposeEchoes() {
+  for (const e of memoryEchoes) {
+    if (e && e.gfx) e.gfx.remove();
+  }
+  memoryEchoes = [];
+  echoesCommitted = 0;
+}
+
+function initEchoes() {
+  disposeEchoes();
+  for (let i = 0; i < CFG.ECHO_LAYERS; i++) {
+    const g = createGraphics(width, height);
+    g.pixelDensity(1);
+    g.noStroke();
+    g.background(0);
+    memoryEchoes.push({ gfx: g });
+  }
+}
+
+function commitEcho() {
+  // 三道门槛：必须有可拷贝的最新帧 / EAR 校准完成 / 睁眼度足够
+  if (!memoryHasFrame) return;
+  if (earWarmupFrames < CFG.EAR_WARMUP_FRAMES) return;
+  if (smoothOpenness < CFG.ECHO_COMMIT_OPENNESS_MIN) return;
+
+  // 1. 释放最老一张（数组末尾）
+  const oldest = memoryEchoes[memoryEchoes.length - 1];
+  if (oldest && oldest.gfx) oldest.gfx.remove();
+
+  // 2. 给除尾巴外的现有 entry 各做一次增量模糊
+  // 累积下来：进入 [1] 模糊 1 次、[2] 2 次、...、[N-1] N-1 次
+  for (let i = 0; i < memoryEchoes.length - 1; i++) {
+    const e = memoryEchoes[i];
+    if (e && e.gfx) e.gfx.filter(BLUR, CFG.ECHO_BLUR_PER_COMMIT);
+  }
+
+  // 3. 整体右挪：[i] ← [i-1]，从尾往头复制引用（不踩自己）
+  for (let i = memoryEchoes.length - 1; i > 0; i--) {
+    memoryEchoes[i] = memoryEchoes[i - 1];
+  }
+
+  // 4. 在 [0] 写入当前 memoryGfx 的全新快照
+  //    立刻做 POSTERIZE：把渐变压成平涂色块（毕加索立体主义面片感）
+  //    一次性付出，之后该 echo 在缓冲里始终是"几色平涂版"
+  const fresh = createGraphics(width, height);
+  fresh.pixelDensity(1);
+  fresh.noStroke();
+  fresh.image(memoryGfx, 0, 0, width, height);
+  if (CFG.ECHO_POSTERIZE_LEVEL && CFG.ECHO_POSTERIZE_LEVEL > 1) {
+    fresh.filter(POSTERIZE, CFG.ECHO_POSTERIZE_LEVEL);
+  }
+  memoryEchoes[0] = { gfx: fresh };
+
+  if (echoesCommitted < memoryEchoes.length) echoesCommitted++;
+}
+
 // ============== 粒子层（睁眼态） ==============
 function drawParticleLayer(mix) {
   sampleBuf.loadPixels();
@@ -274,17 +380,28 @@ function breathPhases() {
   };
 }
 
-// ============== 记忆层主流程：主图 + 分级 + 高光晕 + 漏光 ==============
+// ============== 记忆层主流程：主图 + echo alpha 上叠 + 分级 + 高光晕 + 漏光 ==============
+// 渲染顺序（从底到顶）：
+//   memoryGfx                        ← 当前最锐利帧（按原 v2 α，整体打底）
+//   echoes[N-1] → ... → echoes[0]    ← 普通 alpha 透叠在主图之上，色块感强
+//   color grading
+//   halation
+//   light leak
+//
+// blend 演化：v3.0/3.1 alpha 下叠（echo 被主图遮）→ v3.2 SCREEN 上叠（亮度加性、太柔光雾）
+// → v3.3 alpha 上叠（半透明色块叠在主图上，色块边缘清脆，像 multi-exposure 实物感）
+// 配合 ECHO_BLUR_PER_COMMIT=0：echo 全程不模糊，4 张快照都是清晰的"过去自己"。
 function drawMemoryLayer(strength, phase) {
-  // ── 1. 主图：呼吸缩放 + Ken Burns 微漂移 + tint α 呼吸 ─────────────
   const scl = 1 + CFG.BREATHE_SCALE_AMPL * phase.main;
   const driftX = CFG.DRIFT_PX * phase.tertiary;
   const driftY = CFG.DRIFT_PX * 0.7 * phase.secondary;
   const tintFactor =
     CFG.TINT_BASE_ALPHA *
     (1 + CFG.BREATHE_TINT_AMPL * 0.5 * (phase.main + 1) * 0.5);
-  const tintA = constrain(tintFactor, 0, 1) * 255 * strength;
+  const baseTintMult = constrain(tintFactor, 0, 1);
 
+  // ── 1. 主图：当前帧、最锐利、按原 v2 α ────────────────────────────
+  const tintA = baseTintMult * 255 * strength;
   push();
   translate(width / 2 + driftX, height / 2 + driftY);
   scale(scl);
@@ -295,14 +412,49 @@ function drawMemoryLayer(strength, phase) {
   imageMode(CORNER);
   pop();
 
-  // ── 2. Orange-teal color grading：高光暖、阴影青 ───────────────────
+  // ── 2. Echo 层：Warhol 多重网版 × Wong 时间拖尾 ─────────────────────
+  // (a) 所有 echo 共享同一 trail 方向（缓慢旋转）→ 时间拖尾感，不再各自乱飞
+  // (b) 每张 echo 用独立色板染色（暖→冷）→ 多重网版式色块叠加
+  // 从老到新画（[committed-1] → [0]）：较新色块覆盖较老
+  const trailAngle =
+    ((millis() % CFG.ECHO_TRAIL_ROTATE_MS) / CFG.ECHO_TRAIL_ROTATE_MS) *
+    Math.PI *
+    2;
+  const trailCos = Math.cos(trailAngle);
+  const trailSin = Math.sin(trailAngle);
+
+  for (let i = echoesCommitted - 1; i >= 0; i--) {
+    const e = memoryEchoes[i];
+    if (!e || !e.gfx) continue;
+    const layerDecay = CFG.ECHO_DECAY[i] || 0;
+    if (layerDecay < 0.01) continue;
+
+    const off = CFG.ECHO_OFFSET_PX[i] || 0;
+    const ex = off * trailCos;
+    const ey = off * trailSin;
+    const a = baseTintMult * 255 * strength * layerDecay;
+    const palette =
+      CFG.ECHO_PALETTE_RGB[i] || [255, 255, 255];
+
+    push();
+    translate(width / 2 + driftX + ex, height / 2 + driftY + ey);
+    scale(scl);
+    imageMode(CENTER);
+    tint(palette[0], palette[1], palette[2], a);
+    image(e.gfx, 0, 0, width, height);
+    noTint();
+    imageMode(CORNER);
+    pop();
+  }
+
+  // ── 3. Orange-teal color grading：高光暖、阴影青 ───────────────────
   drawColorGrading(strength, phase);
 
-  // ── 3. Halation 高光晕（lazy bake） ──────────────────────────────
+  // ── 4. Halation 高光晕（lazy bake，只来源于 memoryGfx 最锐利层） ──
   if (halationStale) bakeHalation();
   drawHalation(strength, phase);
 
-  // ── 4. Light leak 漂移漏光 ───────────────────────────────────────
+  // ── 5. Light leak 漂移漏光 ───────────────────────────────────────
   drawLightLeak(strength, phase);
 }
 
@@ -440,6 +592,10 @@ function drawColoredGrain(strength) {
 }
 
 // ============== 状态文本 ==============
+// 沉浸优先：正常运行态完全无字。
+// 只在两种异常态显示：
+//   1. 错误（红字）— 排错唯一线索
+//   2. 摄像头未授权 — 不提示用户不知道点"允许"
 function updateStatus() {
   if (!statusDiv) return;
   const err = window.__twtm.error;
@@ -454,15 +610,5 @@ function updateStatus() {
     statusDiv.html("请允许摄像头访问…");
     return;
   }
-  if (!window.__twtm.ready) {
-    statusDiv.html(window.__twtm.status || "加载中…");
-    return;
-  }
-  if (earWarmupFrames < CFG.EAR_WARMUP_FRAMES) {
-    statusDiv.html(
-      `校准中… ${earWarmupFrames}/${CFG.EAR_WARMUP_FRAMES}（请保持自然睁眼）`
-    );
-    return;
-  }
-  statusDiv.html("睁眼是粒子，闭眼是记忆。");
+  statusDiv.html("");
 }
