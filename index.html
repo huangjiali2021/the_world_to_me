@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>the world, to me</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script>
+      window.__mpStatus = "页面已加载";
+      window.addEventListener("error", (e) => {
+        const msg =
+          (e && (e.message || (e.error && e.error.message))) || String(e);
+        console.error("[global error]", e);
+        window.__mpError = "JS 错误: " + msg;
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        const r = e && e.reason;
+        const msg = r && r.message ? r.message : String(r);
+        console.error("[unhandledrejection]", r);
+        window.__mpError = "Promise 失败: " + msg;
+      });
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.2/lib/p5.min.js"></script>
+  </head>
+  <body>
+    <script type="module" src="./mediapipe.js"></script>
+    <script src="./sketch.js" defer></script>
+  </body>
+</html>
