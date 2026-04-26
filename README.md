@@ -9,6 +9,12 @@ An interactive web piece about perception and memory.
 
 Built with [p5.js](https://p5js.org/) and [MediaPipe FaceLandmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker).
 
+## Live demo
+
+**https://the-world-to-me.vercel.app/**
+
+Deployed on Vercel. Auto-updates 30-60s after each push to `main`.
+
 ## Run locally
 
 The page uses ES modules and the camera API, so it must be served over HTTP (not `file://`).
