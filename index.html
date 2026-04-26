@@ -6,24 +6,27 @@
     <title>the world, to me</title>
     <link rel="stylesheet" href="./style.css" />
     <script>
-      window.__mpStatus = "页面已加载";
+      // 项目命名空间 + 全局错误兜底：face-tracker / sketch 任何阶段抛出的
+      // 异常都摊到 window.__twtm.error，sketch 的状态条会渲染出来。
+      window.__twtm = { status: "page loaded" };
+
       window.addEventListener("error", (e) => {
         const msg =
           (e && (e.message || (e.error && e.error.message))) || String(e);
-        console.error("[global error]", e);
-        window.__mpError = "JS 错误: " + msg;
+        console.error("[twtm/global]", e);
+        window.__twtm.error = "JS error: " + msg;
       });
       window.addEventListener("unhandledrejection", (e) => {
         const r = e && e.reason;
         const msg = r && r.message ? r.message : String(r);
-        console.error("[unhandledrejection]", r);
-        window.__mpError = "Promise 失败: " + msg;
+        console.error("[twtm/global] unhandled rejection:", r);
+        window.__twtm.error = "Promise rejected: " + msg;
       });
     </script>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.11.2/lib/p5.min.js"></script>
   </head>
   <body>
-    <script type="module" src="./mediapipe.js"></script>
+    <script type="module" src="./face-tracker.js"></script>
     <script src="./sketch.js" defer></script>
   </body>
 </html>

@@ -38,7 +38,7 @@ The first ~1 s after the camera starts is a warm-up phase that learns *your* per
 
 - `index.html` — entry
 - `style.css` — black background, centered canvas
-- `mediapipe.js` — camera + FaceLandmarker, exposes `window.gazeData.eyeOpenness`
+- `face-tracker.js` — MediaPipe FaceLandmarker driver, writes `window.__twtm.eye.openness`
 - `sketch.js` — particle layer + memory layer
 - `docs/the_world_to_me_Solution.md` — design notes & decisions
 

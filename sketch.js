@@ -55,7 +55,7 @@ function setup() {
     { video: { facingMode: "user" }, audio: false },
     () => {
       videoReady = true;
-      window.__video = video.elt;
+      window.__twtm.video = video.elt;
     }
   );
   video.size(640, 360);
@@ -91,7 +91,7 @@ function draw() {
   updateStatus();
 
   // 1. 视频未就绪：黑底等
-  if (!videoReady || !window.__video || video.elt.readyState < 2) {
+  if (!videoReady || !window.__twtm.video || video.elt.readyState < 2) {
     return;
   }
 
@@ -139,10 +139,10 @@ function draw() {
 
 // ============== 眼睁度 ==============
 function updateOpenness() {
-  const gd = window.gazeData;
-  if (!gd || typeof gd.eyeOpenness !== "number") return;
+  const eye = window.__twtm.eye;
+  if (!eye || typeof eye.openness !== "number") return;
 
-  const ear = gd.eyeOpenness;
+  const ear = eye.openness;
 
   // 自适应基线：warmup 期纯采 max；warmup 后用最大值更新（仅在更高时）
   if (earWarmupFrames < CFG.EAR_WARMUP_FRAMES) {
@@ -306,7 +306,7 @@ function drawVignetteAndGrain(strength) {
 // ============== 状态文本 ==============
 function updateStatus() {
   if (!statusDiv) return;
-  const err = window.__mpError;
+  const err = window.__twtm.error;
   if (err) {
     statusDiv.html(err);
     statusDiv.addClass("error");
@@ -318,8 +318,8 @@ function updateStatus() {
     statusDiv.html("请允许摄像头访问…");
     return;
   }
-  if (!window.__landmarkerReady) {
-    statusDiv.html(window.__mpStatus || "加载中…");
+  if (!window.__twtm.ready) {
+    statusDiv.html(window.__twtm.status || "加载中…");
     return;
   }
   if (earWarmupFrames < CFG.EAR_WARMUP_FRAMES) {
