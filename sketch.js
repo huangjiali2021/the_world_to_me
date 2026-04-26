@@ -15,13 +15,24 @@ const CFG = {
   // 粒子化（睁眼态）
   SAMPLE_W: 160,
   SAMPLE_H: 90,
-  PARTICLE_SIZE_BASE: 4,
-  PARTICLE_SIZE_OPEN: 7,
-  MAX_JITTER_PX:    50,
+  // 印象派厚涂：cell 仅 12×12px，OPEN=40 → 粒子直径 ≈ cell 3.3 倍 → 高度重叠
+  // 14400 颗大圆 + POSTERIZE 64 色 + 径向焦点衰减 → "色域绘画 / 莫奈式涂抹"质感
+  PARTICLE_SIZE_BASE: 8,
+  PARTICLE_SIZE_OPEN:  40,
+  MAX_JITTER_PX:    60,           // v3.7 50→60，颗粒更迷散
   TRAIL_ALPHA_OPEN: 22,
   TRAIL_ALPHA_CLOSE: 80,
-  DESATURATION_OPEN: 0.45,
+  DESATURATION_OPEN: 0.25,        // v3.6 调小：让 POSTERIZE 后的色块色彩留下来，不被灰化
   PARTICLE_ALPHA: 200,
+  // 跟闭眼 echo 共享"立体主义平涂"美学语言：在 sampleBuf 上做 POSTERIZE，
+  // 粒子读出的颜色就是几色平涂（每通道 4 级 = 64 色，比 echo 的 3 级稍温和）。
+  // 桥接的是色彩颗粒度，不是色板——粒子仍是摄像头采样色（保留"看世界"语义）。
+  PARTICLE_POSTERIZE_LEVEL: 4,
+  // 径向 alpha 衰减：体现"前路迷茫"——中心还算焦点，越往外越溶进迷雾
+  // alpha *= 1 - FALLOFF * (dist/maxDist)^2  （平方衰减，避免每帧 14400 次 Math.pow）
+  // 跟 mix（睁眼度）联动：完全闭眼时不衰减（粒子层本就近消失，无需扣 alpha）
+  // FALLOFF=0.6 → 中心 1.0、半径中点 ~0.85、四角 ~0.4
+  RADIAL_FOCUS_FALLOFF:    0.6,
 
   // ============ 记忆态（闭眼）·胶片记忆质感 ============
   // 多相位呼吸：3 个错相位的正弦，各驱动不同元素，避免"机械齐步"
@@ -238,6 +249,11 @@ function refreshSampleBuf() {
   sampleBuf.scale(-1, 1);
   sampleBuf.image(video, 0, 0, CFG.SAMPLE_W, CFG.SAMPLE_H);
   sampleBuf.pop();
+  // POSTERIZE：跟闭眼 echo 共享平涂色块美学语言
+  // sampleBuf 仅 160×90，每帧 filter 开销 < 0.1ms，可忽略
+  if (CFG.PARTICLE_POSTERIZE_LEVEL && CFG.PARTICLE_POSTERIZE_LEVEL > 1) {
+    sampleBuf.filter(POSTERIZE, CFG.PARTICLE_POSTERIZE_LEVEL);
+  }
 }
 
 // ============== 把当前视频帧拷到记忆 graphics（镜像，按比例 cover） ==============
@@ -342,6 +358,11 @@ function drawParticleLayer(mix) {
   const desat = mix * CFG.DESATURATION_OPEN;
   const psize = lerp(CFG.PARTICLE_SIZE_BASE, CFG.PARTICLE_SIZE_OPEN, mix);
   const pa = CFG.PARTICLE_ALPHA;
+  // 径向焦点：mix 越大（越睁眼）边缘越糊；闭眼瞬间 falloff=0 不衰减
+  const falloff = mix * CFG.RADIAL_FOCUS_FALLOFF;
+  const cx = width * 0.5;
+  const cy = height * 0.5;
+  const invMaxDist2 = 1 / (cx * cx + cy * cy);
 
   noStroke();
   for (let y = 0; y < sh; y++) {
@@ -356,12 +377,19 @@ function drawParticleLayer(mix) {
       g = g + (gray - g) * desat;
       b = b + (gray - b) * desat;
 
+      const cellCx = x * cellW + cellW * 0.5;
+      const cellCy = y * cellH + cellH * 0.5;
+      const dx = cellCx - cx;
+      const dy = cellCy - cy;
+      const distNorm2 = (dx * dx + dy * dy) * invMaxDist2;
+      const focus = 1 - falloff * distNorm2;
+
       const angle = Math.random() * Math.PI * 2;
       const dist = Math.random() * jitter;
-      const px = x * cellW + cellW * 0.5 + Math.cos(angle) * dist;
-      const py = y * cellH + cellH * 0.5 + Math.sin(angle) * dist;
+      const px = cellCx + Math.cos(angle) * dist;
+      const py = cellCy + Math.sin(angle) * dist;
 
-      fill(r, g, b, pa);
+      fill(r, g, b, pa * focus);
       ellipse(px, py, psize, psize);
     }
   }
